@@ -1,0 +1,25 @@
+# Core Framework - FastAPI with standard dependencies (includes uvicorn, fastapi-cli)
+fastapi[standard]>=0.115.0
+
+# HTTP Client
+httpx==0.28.1
+
+# Database
+sqlalchemy==2.0.44
+psycopg2-binary==2.9.11
+
+# Data Validation
+pydantic==2.12.3
+pydantic-settings==2.11.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+
+# System Monitoring
+psutil==7.1.2
+
+# Configuration
+python-dotenv==1.0.0
+
+# Scheduling
+apscheduler==3.11.0
