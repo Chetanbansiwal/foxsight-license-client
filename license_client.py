@@ -59,11 +59,14 @@ class LicenseClient:
                 data = response.json()
 
                 if data.get("success"):
+                    # Extract license data from nested response
+                    license_data = data["data"].get("license", data["data"])
+
                     # Store in local cache
-                    await self._store_license_cache(data["data"])
+                    await self._store_license_cache(license_data)
 
                     # Sync feature flags
-                    await self._sync_feature_flags(data["data"])
+                    await self._sync_feature_flags(license_data)
 
                     # Start heartbeat
                     self._start_heartbeat()
@@ -73,7 +76,7 @@ class LicenseClient:
 
                     return {
                         "success": True,
-                        "license": data["data"],
+                        "license": license_data,
                         "message": "License activated successfully"
                     }
                 else:
@@ -123,17 +126,26 @@ class LicenseClient:
                 response.raise_for_status()
                 data = response.json()
 
-                if data.get("success") and data["data"].get("isValid"):
+                # Handle both wrapped {success, data} and direct {isValid} response formats
+                validation_data = data.get("data", data) if data.get("success") else data
+                is_valid = validation_data.get("isValid", False)
+
+                if is_valid:
                     # Update cache
-                    await self._update_license_cache(data["data"])
+                    await self._update_license_cache(validation_data)
+
+                    # Sync feature flags from validation response
+                    license_info = validation_data.get("license", {})
+                    if license_info.get("enabledFeatures"):
+                        await self._sync_feature_flags(license_info)
 
                     # Log success
                     self._log_validation_attempt(cached_license.license_key, "success", None)
 
                     return {
                         "valid": True,
-                        "license": data["data"]["license"],
-                        "inGracePeriod": False
+                        "license": license_info,
+                        "inGracePeriod": validation_data.get("gracePeriodActive", False)
                     }
                 else:
                     # Validation failed - check grace period
