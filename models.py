@@ -44,6 +44,17 @@ class HeartbeatResponse(BaseModel):
     success: bool
     message: str
 
+class CheckLimitRequest(BaseModel):
+    limitType: str  # "cameras" or "users"
+    currentCount: int
+
+class CheckLimitResponse(BaseModel):
+    allowed: bool
+    limitType: str
+    currentCount: int
+    maxAllowed: Optional[int] = None
+    message: Optional[str] = None
+
 class HealthCheckResponse(BaseModel):
     status: str
     service: str

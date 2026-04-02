@@ -13,6 +13,8 @@ from models import (
     LicenseValidationResponse,
     FeatureCheckRequest,
     FeatureCheckResponse,
+    CheckLimitRequest,
+    CheckLimitResponse,
     HeartbeatResponse,
     HealthCheckResponse
 )
@@ -93,6 +95,25 @@ async def check_feature(
     client = LicenseClient(db)
     available = await client.is_feature_available(request.featureKey)
     return {"featureKey": request.featureKey, "available": available}
+
+@app.post("/api/license/check-limit", response_model=CheckLimitResponse)
+async def check_limit(
+    request: CheckLimitRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Check if adding one more resource would exceed license limits.
+
+    Used by camera-management and user-management services before creating resources.
+    Accepts limitType ("cameras" or "users") and currentCount.
+    """
+    client = LicenseClient(db)
+    result = client.check_limit(request.limitType, request.currentCount)
+
+    if not result["allowed"]:
+        raise HTTPException(status_code=403, detail=result["message"])
+
+    return result
 
 @app.post("/api/license/heartbeat", response_model=HeartbeatResponse)
 async def send_heartbeat(db: Session = Depends(get_db)):

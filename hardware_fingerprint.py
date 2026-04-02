@@ -1,16 +1,25 @@
-import uuid
 import hashlib
 import platform
 import psutil
+from pathlib import Path
 
 def get_hardware_fingerprint() -> str:
     """
-    Generate a unique hardware fingerprint for this system.
-    Combines multiple system identifiers to create a stable ID.
+    Generate a unique hardware fingerprint for the HOST system.
+    Uses /etc/machine-id (mounted from host) as the primary stable identifier,
+    combined with CPU and architecture info. This avoids Docker container MAC
+    addresses which change on container recreation.
     """
-    # Get MAC address (most stable identifier)
-    mac = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
-                    for elements in range(0, 2*6, 2)][::-1])
+    # Use host machine-id (stable across reboots, unique per host)
+    # Must be mounted into the container: -v /etc/machine-id:/etc/machine-id:ro
+    machine_id = ""
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
+        try:
+            machine_id = Path(path).read_text().strip()
+            if machine_id:
+                break
+        except (FileNotFoundError, PermissionError):
+            continue
 
     # Get CPU info
     cpu_count = str(psutil.cpu_count(logical=True))
@@ -19,8 +28,8 @@ def get_hardware_fingerprint() -> str:
     system = platform.system()
     machine = platform.machine()
 
-    # Create fingerprint
-    fingerprint_data = f"{mac}|{cpu_count}|{system}|{machine}"
+    # Create fingerprint from host-level identifiers
+    fingerprint_data = f"{machine_id}|{cpu_count}|{system}|{machine}"
     hardware_id = hashlib.sha256(fingerprint_data.encode()).hexdigest()
 
     return hardware_id

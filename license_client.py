@@ -388,6 +388,48 @@ class LicenseClient:
             "storageUsedGb": 0   # TODO: Query from storage
         }
 
+    def check_limit(self, limit_type: str, current_count: int) -> Dict[str, Any]:
+        """
+        Check whether adding one more resource would exceed the license limit.
+        Returns allowed=True if within limits or no license/limit is set.
+        """
+        LIMIT_MAP = {
+            "cameras": "maxCameras",
+            "users": "maxUsers",
+        }
+
+        limit_key = LIMIT_MAP.get(limit_type)
+        if not limit_key:
+            return {"allowed": True, "limitType": limit_type, "currentCount": current_count,
+                    "message": f"Unknown limit type: {limit_type}"}
+
+        cached_license = self._get_cached_license()
+        if not cached_license or not cached_license.is_valid:
+            # No valid license — defer to ALLOW_UNLICENSED_CORE_FEATURES setting
+            if settings.ALLOW_UNLICENSED_CORE_FEATURES:
+                return {"allowed": True, "limitType": limit_type, "currentCount": current_count,
+                        "message": "No active license, core features unrestricted"}
+            return {"allowed": False, "limitType": limit_type, "currentCount": current_count,
+                    "maxAllowed": 0, "message": "No active license"}
+
+        license_data = cached_license.license_data or {}
+        limits = license_data.get("limits", {})
+        max_allowed = limits.get(limit_key) or license_data.get(limit_key)
+
+        if max_allowed is None:
+            # Tier has no limit for this resource (unlimited)
+            return {"allowed": True, "limitType": limit_type, "currentCount": current_count,
+                    "message": "No limit set for this resource"}
+
+        allowed = current_count < max_allowed
+        return {
+            "allowed": allowed,
+            "limitType": limit_type,
+            "currentCount": current_count,
+            "maxAllowed": max_allowed,
+            "message": None if allowed else f"License limit reached: {current_count}/{max_allowed} {limit_type}"
+        }
+
     async def get_license_status(self) -> Dict[str, Any]:
         """
         Get current license status for UI display.
@@ -411,8 +453,8 @@ class LicenseClient:
                 "licenseKey": cached_license.license_key,
                 "tier": license_data.get("tier", ""),
                 "expiresAt": license_data.get("expiresAt"),
-                "maxCameras": license_data.get("maxCameras"),
-                "maxUsers": license_data.get("maxUsers"),
+                "maxCameras": license_data.get("limits", {}).get("maxCameras") or license_data.get("maxCameras"),
+                "maxUsers": license_data.get("limits", {}).get("maxUsers") or license_data.get("maxUsers"),
                 "inGracePeriod": validation.get("inGracePeriod", False),
                 "gracePeriodExpires": validation.get("gracePeriodExpires"),
                 "lastValidated": cached_license.last_validated_at.isoformat() if cached_license.last_validated_at else None
