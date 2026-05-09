@@ -127,6 +127,28 @@ async def send_heartbeat(db: Session = Depends(get_db)):
     await client.send_heartbeat()
     return {"success": True, "message": "Heartbeat sent"}
 
+# ---------------------------------------------------------------------------
+# Registry-token accessor.
+#
+# install.sh runs the device-code activation directly against the cloud (no
+# license-client involved), seeds REGISTRY_TOKEN/USERNAME/EXPIRES_AT into our
+# env via .env, and we hand them out to update.sh on demand. Keeping this in
+# one place means update.sh doesn't need to know where the credentials live.
+# ---------------------------------------------------------------------------
+
+import device_code_client
+
+
+@app.get("/api/license/registry-token")
+async def device_code_registry_token(db: Session = Depends(get_db)):
+    """Returns the cached registry credentials update.sh needs to docker-login
+    and pull updated images."""
+    token = device_code_client.get_registry_token(db)
+    if not token:
+        raise HTTPException(status_code=404, detail="No registry token cached")
+    return token
+
+
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check(db: Session = Depends(get_db)):
     """
