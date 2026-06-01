@@ -447,14 +447,28 @@ class LicenseClient:
 
         if validation["valid"]:
             license_data = cached_license.license_data
+            # Pull the live "licensed AND system-enabled" feature keys from
+            # LocalFeatureFlag — that table is the authoritative cache of
+            # what the cloud said `enabled_features` is, written by
+            # `_sync_feature_flags()` on every successful activate/validate.
+            enabled_features = [
+                row.feature_key
+                for row in self.db.query(LocalFeatureFlag)
+                .filter(LocalFeatureFlag.licensed.is_(True))
+                .filter(LocalFeatureFlag.system_enabled.is_(True))
+                .all()
+            ]
+            limits = license_data.get("limits", {}) if isinstance(license_data, dict) else {}
             return {
                 "hasLicense": True,
                 "status": license_data.get("status", "active"),
                 "licenseKey": cached_license.license_key,
                 "tier": license_data.get("tier", ""),
                 "expiresAt": license_data.get("expiresAt"),
-                "maxCameras": license_data.get("limits", {}).get("maxCameras") or license_data.get("maxCameras"),
-                "maxUsers": license_data.get("limits", {}).get("maxUsers") or license_data.get("maxUsers"),
+                "maxCameras": limits.get("maxCameras") or license_data.get("maxCameras"),
+                "maxUsers": limits.get("maxUsers") or license_data.get("maxUsers"),
+                "maxOrganizations": limits.get("maxOrganizations") or license_data.get("maxOrganizations"),
+                "enabledFeatures": enabled_features,
                 "inGracePeriod": validation.get("inGracePeriod", False),
                 "gracePeriodExpires": validation.get("gracePeriodExpires"),
                 "lastValidated": cached_license.last_validated_at.isoformat() if cached_license.last_validated_at else None
