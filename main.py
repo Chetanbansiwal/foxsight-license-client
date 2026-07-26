@@ -140,10 +140,24 @@ import device_code_client
 
 
 @app.get("/api/license/registry-token")
-async def device_code_registry_token(db: Session = Depends(get_db)):
+async def device_code_registry_token(force: bool = False, db: Session = Depends(get_db)):
     """Returns the cached registry credentials update.sh needs to docker-login
-    and pull updated images."""
+    and pull updated images.
+
+    Self-healing: if the cached token is missing, expired, or the caller passes
+    ?force=1 (e.g. after a docker-login failure), we re-fetch a fresh token
+    from the cloud so a REGISTRY_DEPLOY_TOKEN rotation on the license-server
+    propagates here automatically. On a cloud error we fall back to whatever is
+    cached rather than hard-failing.
+    """
     token = device_code_client.get_registry_token(db)
+    if force or token is None or token.get("expired"):
+        try:
+            fresh = await LicenseClient(db).refresh_registry_token()
+        except Exception:
+            fresh = None
+        if fresh and fresh.get("token"):
+            token = fresh
     if not token:
         raise HTTPException(status_code=404, detail="No registry token cached")
     return token

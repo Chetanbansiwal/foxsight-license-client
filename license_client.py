@@ -159,6 +159,46 @@ class LicenseClient:
             self._log_validation_attempt(cached_license.license_key, "failed", str(e))
             return await self._check_grace_period(cached_license)
 
+    async def refresh_registry_token(self) -> Optional[Dict[str, Any]]:
+        """Fetch a fresh registry token from the cloud and overwrite the local
+        cache. Authenticated like validate: our cached license key + hardware
+        id. Returns the new token dict, or None on failure (the caller then
+        falls back to any stale cached token rather than hard-failing).
+
+        This is what lets a REGISTRY_DEPLOY_TOKEN rotation on the license-server
+        reach every box automatically: once a box's cached token passes its TTL,
+        the next /api/license/registry-token read re-fetches through here.
+        """
+        import device_code_client
+
+        cached_license = self._get_cached_license()
+        if not cached_license:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=settings.LICENSE_API_TIMEOUT) as client:
+                response = await client.post(
+                    f"{self.cloud_api_url}/licenses/registry-token",
+                    json={
+                        "licenseKey": cached_license.license_key,
+                        "hardwareId": self.hardware_id
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Installation-ID": self.installation_id
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                # Endpoint returns {success, data:{username, token, expiresAt}}.
+                payload = data.get("data", data)
+                if not payload or not payload.get("token"):
+                    return None
+                return device_code_client.store_registry_token(self.db, payload)
+        except Exception:
+            # Network/cloud error — caller keeps using the stale cached token.
+            return None
+
     async def _check_grace_period(self, cached_license: LocalLicenseCache) -> Dict[str, Any]:
         """
         Check if system can continue operating in grace period.

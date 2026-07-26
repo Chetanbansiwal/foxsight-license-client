@@ -60,6 +60,22 @@ def _seed_from_env(db: Session) -> Optional[Dict[str, Any]]:
     return payload
 
 
+def store_registry_token(db: Session, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Overwrite the cached registry token. Used by the cloud re-fetch path
+    (LicenseClient.refresh_registry_token) so an expired token can be replaced
+    without touching .env. Returns the freshly-cached token (normalised)."""
+    token = (payload or {}).get("token", "").strip()
+    username = (payload or {}).get("username", "").strip()
+    if not token or not username:
+        return None
+    _set_kv(db, _RT_KEY, json.dumps({
+        "username": username,
+        "token": token,
+        "expiresAt": (payload or {}).get("expiresAt", "").strip(),
+    }))
+    return get_registry_token(db)
+
+
 def get_registry_token(db: Session) -> Optional[Dict[str, Any]]:
     """Return the cached registry token. Falls back to env on first read."""
     raw = _get_kv(db, _RT_KEY)
