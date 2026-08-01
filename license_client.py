@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import LocalLicenseCache, LocalLicenseValidationAttempt, LocalFeatureFlag, SystemConfig
@@ -366,6 +367,38 @@ class LicenseClient:
         cached_license.last_validated_at = datetime.utcnow()
         cached_license.is_valid = validation_data.get("isValid", False)
         cached_license.in_grace_period = False
+
+        # Refresh the licence itself, not just the validation stamp.
+        #
+        # get_license_status() serves `license_data`, so only stamping
+        # last_validated_at meant a plan change never reached the UI: the cloud
+        # returned the upgraded tier and limits, we recorded "still valid", and
+        # went on displaying the old plan forever. An operator who upgraded to
+        # Enterprise saw FREE_GENERAL with maxUsers 1 no matter how many times
+        # they pressed Validate.
+        license_info = validation_data.get("license") or {}
+        if license_info:
+            merged = dict(cached_license.license_data or {})
+            # Flatten `limits` alongside the top-level fields, which is the
+            # shape activation stores and the UI reads.
+            limits = license_info.pop("limits", None) or {}
+            merged.update({k: v for k, v in license_info.items() if v is not None})
+            merged.update({k: v for k, v in limits.items() if v is not None})
+            cached_license.license_data = merged
+            # SQLAlchemy does not track in-place mutation of a JSON column.
+            flag_modified(cached_license, "license_data")
+
+            expires_at = license_info.get("expiresAt")
+            if expires_at:
+                try:
+                    cached_license.valid_until = datetime.fromisoformat(
+                        str(expires_at).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                except ValueError:
+                    # Keep the old expiry rather than crash the refresh; the
+                    # tier and limits above are the part the operator sees.
+                    pass
+
         self.db.commit()
 
     async def _sync_feature_flags(self, license_data: Dict[str, Any]):
