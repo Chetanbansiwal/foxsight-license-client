@@ -383,7 +383,13 @@ class LicenseClient:
             # shape activation stores and the UI reads.
             limits = license_info.pop("limits", None) or {}
             merged.update({k: v for k, v in license_info.items() if v is not None})
-            merged.update({k: v for k, v in limits.items() if v is not None})
+            if limits:
+                # get_license_status() reads the NESTED limits first and only
+                # falls back to the flattened keys, so refreshing one and not
+                # the other leaves the stale plan winning. Update both.
+                merged["limits"] = {**(merged.get("limits") or {}),
+                                    **{k: v for k, v in limits.items() if v is not None}}
+                merged.update({k: v for k, v in limits.items() if v is not None})
             cached_license.license_data = merged
             # SQLAlchemy does not track in-place mutation of a JSON column.
             flag_modified(cached_license, "license_data")
