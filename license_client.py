@@ -254,7 +254,7 @@ class LicenseClient:
         """
         cached_license = self._get_cached_license()
         if not cached_license:
-            return
+            return {"success": False, "message": "No licence on this box"}
 
         try:
             # Collect usage metrics
@@ -262,14 +262,18 @@ class LicenseClient:
             system_info = get_system_info()
 
             async with httpx.AsyncClient(timeout=settings.LICENSE_API_TIMEOUT) as client:
-                await client.post(
+                # Field names as the licence server documents them. This sent
+                # `usageMetrics` / `systemInfo` while the route required
+                # `usageData`, and ignored the answer: every heartbeat from every
+                # box was refused while this logged success (found 2026-10-05).
+                resp = await client.post(
                     f"{self.cloud_api_url}/licenses/heartbeat",
                     json={
                         "licenseKey": cached_license.license_key,
                         "hardwareId": self.hardware_id,
                         "installationId": self.installation_id,
-                        "usageMetrics": usage_metrics,
-                        "systemInfo": system_info
+                        "usageData": usage_metrics,
+                        "systemHealth": system_info
                     },
                     headers={
                         "Content-Type": "application/json",
@@ -277,14 +281,29 @@ class LicenseClient:
                     }
                 )
 
-                # Update last validation time
-                cached_license.last_validated_at = datetime.utcnow()
-                self.db.commit()
+            # Only an accepted heartbeat counts as contact with the cloud: the
+            # grace period is measured from last_validated_at, so recording a
+            # refused one would hide a box that has lost its licence server.
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            result = body.get("data") if isinstance(body, dict) else None
+            accepted = resp.status_code < 300 and isinstance(result, dict) and result.get("success") is not False
+            if not accepted:
+                reason = (result or {}).get("message") or (body.get("error") if isinstance(body, dict) else None) \
+                    or f"HTTP {resp.status_code}"
+                print(f"Heartbeat refused by the licence server: {reason}")
+                return {"success": False, "message": f"Heartbeat refused: {reason}"}
 
-                print(f"Heartbeat sent successfully at {datetime.utcnow()}")
+            cached_license.last_validated_at = datetime.utcnow()
+            self.db.commit()
+            print(f"Heartbeat accepted at {datetime.utcnow()}")
+            return {"success": True, "message": "Heartbeat accepted"}
 
         except Exception as e:
             print(f"Heartbeat failed: {str(e)}")
+            return {"success": False, "message": f"Heartbeat failed: {e}"}
 
     def _start_heartbeat(self):
         """
@@ -462,7 +481,7 @@ class LicenseClient:
         # Query actual usage from database
         # This is placeholder - implement based on your schema
         return {
-            "camerasInUse": 0,  # TODO: Query from cameras table
+            "camerasActive": 0,  # TODO: Query from cameras table
             "usersActive": 0,    # TODO: Query from users table
             "storageUsedGb": 0   # TODO: Query from storage
         }

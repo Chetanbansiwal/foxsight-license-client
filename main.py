@@ -124,8 +124,9 @@ async def send_heartbeat(db: Session = Depends(get_db)):
     triggered manually for testing or immediate sync.
     """
     client = LicenseClient(db)
-    await client.send_heartbeat()
-    return {"success": True, "message": "Heartbeat sent"}
+    # The licence server's verdict, not just "sent" (it used to report success
+    # for heartbeats the server refused).
+    return await client.send_heartbeat()
 
 # ---------------------------------------------------------------------------
 # Registry-token accessor.
