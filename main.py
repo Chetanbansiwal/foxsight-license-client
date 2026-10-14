@@ -1,8 +1,13 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database import get_db
+import activation
+from database import get_db, SessionLocal
 from license_client import LicenseClient
 from hardware_fingerprint import get_hardware_fingerprint
 from config import settings
@@ -19,10 +24,43 @@ from models import (
     HealthCheckResponse
 )
 
+async def _keep_licence_current():
+    """Revalidate and heartbeat on a timer, from startup.
+
+    The activation gate counts time since the licence server last accepted
+    this box, so something has to keep asking — including on a box nobody
+    opens the UI of. (A scheduler used to be started by activation, inside a
+    per-request object, so it never survived a restart.)
+    """
+    # Soon after startup: a box updated from before RA-3 may have no recent
+    # contact on record, and stays locked until the first validation lands.
+    await asyncio.sleep(10)
+    while True:
+        db = SessionLocal()
+        try:
+            client = LicenseClient(db)
+            if client._get_cached_license():
+                await client.validate_license()
+                await client.send_heartbeat()
+        except Exception as e:
+            print(f"Background licence check failed: {e}")
+        finally:
+            db.close()
+        await asyncio.sleep(settings.HEARTBEAT_INTERVAL_HOURS * 3600)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_keep_licence_current())
+    yield
+    task.cancel()
+
+
 app = FastAPI(
     title="Foxsight License Client Service",
     description="On-premise license management for Foxsight Central Command VMS",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS
@@ -67,7 +105,54 @@ async def get_license_status(db: Session = Depends(get_db)):
     """
     client = LicenseClient(db)
     status = await client.get_license_status()
+    # The gateway's verdict, so the UI shows the activation screen exactly
+    # when the API refuses.
+    state = activation.activation_state(db)
+    status["activated"] = state["activated"]
+    status["activationReason"] = state.get("reason") or state.get("graceReason")
+    status["locksAt"] = state.get("locksAt") or state.get("lockedAt")
     return status
+
+
+@app.get("/api/license/state")
+def get_activation_state(db: Session = Depends(get_db)):
+    """Whether this box may be used (WS-RA RA-3). Local only, no cloud call:
+    the API gateway asks on every request."""
+    return activation.activation_state(db)
+
+
+class EmailActivationRequest(BaseModel):
+    email: str
+
+
+def _activation_http_error(e: activation.ActivationError) -> HTTPException:
+    return HTTPException(status_code=e.status, detail=e.message)
+
+
+@app.post("/api/license/activation")
+async def start_email_activation(request: EmailActivationRequest, db: Session = Depends(get_db)):
+    """Activate with an email: the licence server emails a confirmation link,
+    then GET /api/license/activation completes the activation."""
+    try:
+        return await activation.start_email_activation(db, request.email)
+    except activation.ActivationError as e:
+        raise _activation_http_error(e)
+
+
+@app.get("/api/license/activation")
+async def poll_email_activation(db: Session = Depends(get_db)):
+    """Where the email activation stands; activates once the link is clicked."""
+    client = LicenseClient(db)
+    try:
+        return await activation.poll_email_activation(db, client.activate_license)
+    except activation.ActivationError as e:
+        raise _activation_http_error(e)
+
+
+@app.delete("/api/license/activation")
+def cancel_email_activation(db: Session = Depends(get_db)):
+    activation.cancel_email_activation(db)
+    return {"state": "none"}
 
 @app.post("/api/license/validate", response_model=LicenseValidationResponse)
 async def validate_license(db: Session = Depends(get_db)):

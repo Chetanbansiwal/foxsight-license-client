@@ -32,6 +32,11 @@ class LicenseStatusResponse(BaseModel):
     lastValidated: Optional[str] = None
     message: Optional[str] = None
     reason: Optional[str] = None
+    # The activation gate's verdict (activation.py), which the API gateway
+    # enforces: the UI shows the activation screen when this is false.
+    activated: Optional[bool] = None
+    activationReason: Optional[str] = None
+    locksAt: Optional[str] = None
 
 class LicenseValidationResponse(BaseModel):
     valid: bool

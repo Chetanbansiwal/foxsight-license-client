@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     OFFLINE_GRACE_PERIOD_HOURS: int = 72
 
     # Feature Flags
-    ALLOW_UNLICENSED_CORE_FEATURES: bool = True  # Allow basic VMS without license
+    # Dev only (dev-box.override.yml): core features without a licence row.
+    # Activation is separate and has no switch (activation.py).
+    ALLOW_UNLICENSED_CORE_FEATURES: bool = False
 
     class Config:
         env_file = ".env"

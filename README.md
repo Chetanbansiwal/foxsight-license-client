@@ -130,7 +130,7 @@ GET /health
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://vms_user:vms_secure_password@localhost:5432/vms_db` |
 | `HEARTBEAT_INTERVAL_HOURS` | Heartbeat frequency | `4` |
 | `OFFLINE_GRACE_PERIOD_HOURS` | Grace period duration | `72` |
-| `ALLOW_UNLICENSED_CORE_FEATURES` | Allow core features without license | `true` |
+| `ALLOW_UNLICENSED_CORE_FEATURES` | Dev only: core features without a licence row (does not bypass activation) | `false` |
 
 ## Database Schema
 

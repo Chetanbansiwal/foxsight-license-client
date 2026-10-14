@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import LocalLicenseCache, LocalLicenseValidationAttempt, LocalFeatureFlag, SystemConfig
 from hardware_fingerprint import get_hardware_fingerprint, get_system_info
@@ -16,7 +15,6 @@ class LicenseClient:
         self.cloud_api_url = settings.LICENSE_API_URL
         self.installation_id = self._get_or_create_installation_id()
         self.hardware_id = get_hardware_fingerprint()
-        self.scheduler = AsyncIOScheduler()
 
     def _get_or_create_installation_id(self) -> str:
         """Get or generate unique installation ID."""
@@ -69,8 +67,14 @@ class LicenseClient:
                     # Sync feature flags
                     await self._sync_feature_flags(license_data)
 
-                    # Start heartbeat
-                    self._start_heartbeat()
+                    # The licence server accepted this machine's hardware ID:
+                    # the activation gate holds the box to it (activation.py).
+                    import activation
+                    activation.record_activation_hardware(self.db, self.hardware_id)
+
+                    # Heartbeats and revalidation run from main.py's background
+                    # loop, which survives restarts; a scheduler started here
+                    # did not.
 
                     # Log success
                     self._log_validation_attempt(license_key, "success", None)
@@ -149,8 +153,20 @@ class LicenseClient:
                         "inGracePeriod": validation_data.get("gracePeriodActive", False)
                     }
                 else:
-                    # Validation failed - check grace period
-                    return await self._check_grace_period(cached_license)
+                    # The licence server refused the licence (revoked, expired,
+                    # inactive, other hardware) — distinct from not reaching it.
+                    # The activation gate locks the box once this has lasted
+                    # the grace period, so start the clock on the first refusal.
+                    reason = validation_data.get("reason") or "Licence refused by the licence server"
+                    if cached_license.is_valid is not False:
+                        cached_license.grace_period_started_at = datetime.utcnow()
+                    cached_license.is_valid = False
+                    cached_license.validation_error = reason
+                    self.db.commit()
+                    self._log_validation_attempt(cached_license.license_key, "failed", reason)
+                    result = await self._check_grace_period(cached_license)
+                    result.setdefault("reason", reason)
+                    return result
 
         except httpx.HTTPError as e:
             self._log_validation_attempt(cached_license.license_key, "offline", str(e))
@@ -305,19 +321,6 @@ class LicenseClient:
             print(f"Heartbeat failed: {str(e)}")
             return {"success": False, "message": f"Heartbeat failed: {e}"}
 
-    def _start_heartbeat(self):
-        """
-        Start periodic heartbeat scheduler.
-        """
-        if not self.scheduler.running:
-            self.scheduler.add_job(
-                self.send_heartbeat,
-                'interval',
-                hours=settings.HEARTBEAT_INTERVAL_HOURS,
-                id='license_heartbeat'
-            )
-            self.scheduler.start()
-
     async def is_feature_available(self, feature_key: str) -> bool:
         """
         Check if a specific feature is available based on license.
@@ -358,8 +361,20 @@ class LicenseClient:
 
         valid_until = datetime.utcnow() + timedelta(days=30)  # Default 30 days
 
+        # One licence per box. Activating a different key used to add a second
+        # row while _get_cached_license() kept returning the first, so the old
+        # licence stayed in force.
+        self.db.query(LocalLicenseCache).filter(
+            LocalLicenseCache.license_key != license_data["licenseKey"]
+        ).delete(synchronize_session=False)
+
         if existing:
             existing.license_data = license_data
+            existing.last_validated_at = datetime.utcnow()
+            existing.grace_period_started_at = None
+            existing.grace_period_expires_at = None
+            existing.in_grace_period = False
+            existing.validation_error = None
             existing.cached_at = datetime.utcnow()
             existing.valid_until = valid_until
             existing.is_valid = True
@@ -369,6 +384,7 @@ class LicenseClient:
                 license_key=license_data["licenseKey"],
                 license_data=license_data,
                 valid_until=valid_until,
+                last_validated_at=datetime.utcnow(),
                 license_signature=license_data.get("signature", "")
             )
             self.db.add(cached_license)
@@ -386,6 +402,10 @@ class LicenseClient:
         cached_license.last_validated_at = datetime.utcnow()
         cached_license.is_valid = validation_data.get("isValid", False)
         cached_license.in_grace_period = False
+        # Accepted again: any refusal countdown is over.
+        cached_license.grace_period_started_at = None
+        cached_license.grace_period_expires_at = None
+        cached_license.validation_error = None
 
         # Refresh the licence itself, not just the validation stamp.
         #
