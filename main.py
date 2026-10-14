@@ -37,16 +37,23 @@ async def _keep_licence_current():
     await asyncio.sleep(10)
     while True:
         db = SessionLocal()
+        delay = settings.HEARTBEAT_INTERVAL_HOURS * 3600
         try:
             client = LicenseClient(db)
             if client._get_cached_license():
                 await client.validate_license()
                 await client.send_heartbeat()
+                # No lease yet (a box updated from before leases, or the
+                # licence server was unreachable): the box stays locked until
+                # one arrives, so ask again soon.
+                if not activation.current_lease(db):
+                    delay = 60
         except Exception as e:
             print(f"Background licence check failed: {e}")
+            delay = 60
         finally:
             db.close()
-        await asyncio.sleep(settings.HEARTBEAT_INTERVAL_HOURS * 3600)
+        await asyncio.sleep(delay)
 
 
 @asynccontextmanager
@@ -117,8 +124,14 @@ async def get_license_status(db: Session = Depends(get_db)):
 @app.get("/api/license/state")
 def get_activation_state(db: Session = Depends(get_db)):
     """Whether this box may be used (WS-RA RA-3). Local only, no cloud call:
-    the API gateway asks on every request."""
-    return activation.activation_state(db)
+    the API gateway asks on every request. Carries the signed lease, which the
+    gateway and the recording service verify themselves rather than trusting
+    this answer."""
+    state = activation.activation_state(db)
+    lease = activation.current_lease(db)
+    if lease:
+        state["lease"] = lease
+    return state
 
 
 class EmailActivationRequest(BaseModel):

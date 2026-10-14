@@ -1,21 +1,22 @@
 """Activation: whether this box may be used, and the in-app email activation.
 
-WS-RA RA-3 (REGISTRY_ACCESS_SPEC.md §6). The API gateway refuses everything
+WS-RA RA-3 (REGISTRY_ACCESS_SPEC.md §6, §10). The API gateway refuses everything
 but login, licence and health routes until `activation_state()` says the box is
 activated, so this verdict is what makes "use requires an email" true on a
 running box.
 
-The verdict is computed from the local cache only — no call to the licence
-server — because the gateway asks for it on every request (cached there for a
-few seconds). The background validator in main.py keeps the cache current.
+The verdict rests on the licence server's signed lease (shared/licence_lease.py):
+a box is activated only while it holds a genuine lease for its cached licence
+and this machine's hardware, unexpired or within its 72 h grace. The licence
+server issues a lease on every activation and successful validation (at most 30
+days, never past the licence's expiry), so a site that is offline keeps working
+for that long, and a hand-edited cache cannot fake an activation. On top of the
+lease, a refusal by the licence server (revoked, deactivated) locks the box
+72 h after it is first seen, without waiting for the lease to run out.
 
-A box stays activated while:
-  * a licence is cached and was activated on this machine's hardware;
-  * the licence has not expired more than the grace period ago;
-  * the licence server has not refused it for longer than the grace period
-    (revoked, deactivated, moved to other hardware);
-  * the licence server was reached within OFFLINE_DAYS plus the grace period.
-    A site that is offline keeps working that long; then it must reconnect.
+Computed locally — no call to the licence server — because the gateway asks on
+every request (cached there for a few seconds). The background validator in
+main.py keeps the lease fresh.
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ from typing import Any, Dict, Optional
 import httpx
 from sqlalchemy.orm import Session
 
+import licence_lease
 from config import settings
 from database import LocalLicenseCache, SystemConfig
 from hardware_fingerprint import get_hardware_fingerprint
 
-OFFLINE_DAYS = 30
-_HWID_KEY = "activated_hardware_id"
+_LEASE_KEY = "licence_lease"
 _PENDING_KEY = "pending_activation"
 
 
@@ -61,9 +62,15 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return None
 
 
-def record_activation_hardware(db: Session, hardware_id: str) -> None:
-    """Called when the licence server accepts an activation on this machine."""
-    _set_kv(db, _HWID_KEY, hardware_id)
+def store_lease(db: Session, token: Optional[str]) -> None:
+    """Keep the lease from an activation or validation answer. An answer
+    without one (a licence server with no signing key) keeps the old lease."""
+    if token:
+        _set_kv(db, _LEASE_KEY, token)
+
+
+def current_lease(db: Session) -> Optional[str]:
+    return _get_kv(db, _LEASE_KEY)
 
 
 def activation_state(db: Session) -> Dict[str, Any]:
@@ -72,46 +79,41 @@ def activation_state(db: Session) -> Dict[str, Any]:
     if not cached:
         return {"activated": False, "reason": "not_activated"}
 
-    hardware_id = get_hardware_fingerprint()
-    bound = _get_kv(db, _HWID_KEY)
-    if bound is None:
-        # Activated before RA-3, which did not record the hardware. The
-        # licence server checked it at activation; take this machine as it.
-        record_activation_hardware(db, hardware_id)
-    elif bound != hardware_id:
-        # A copied disk or VM: the licence belongs to the machine it was
-        # activated on.
-        return {"activated": False, "reason": "hardware_changed"}
-
     now = datetime.utcnow()
-    grace = timedelta(hours=settings.OFFLINE_GRACE_PERIOD_HOURS)
-    deadlines = []  # (when the box locks, why)
-
     data = cached.license_data if isinstance(cached.license_data, dict) else {}
     expires = _parse_time(data.get("expiresAt"))
-    if expires:
-        deadlines.append((expires + grace, "expired", expires))
-    if cached.is_valid is False and cached.grace_period_started_at:
-        deadlines.append((cached.grace_period_started_at + grace, "refused",
-                          cached.grace_period_started_at))
-    last_contact = cached.last_validated_at or cached.cached_at
-    if last_contact:
-        offline_from = last_contact + timedelta(days=OFFLINE_DAYS)
-        deadlines.append((offline_from + grace, "offline_too_long", offline_from))
 
-    for locks_at, reason, _ in deadlines:
+    lease = licence_lease.check(current_lease(db), licence_key=cached.license_key,
+                                hardware_id=get_hardware_fingerprint())
+    if not lease["activated"]:
+        reason = lease["reason"]
+        if reason == "lease_expired":
+            # Ran out because the licence expired, or because the box has not
+            # reached the licence server for the lease's lifetime.
+            reason = "expired" if expires and now >= expires else "offline_too_long"
+        out = {"activated": False, "reason": reason}
+        if lease.get("lockedAt"):
+            out["lockedAt"] = lease["lockedAt"]
+        return out
+
+    # A refusal by the licence server locks after the grace period, even with
+    # an unexpired lease (the lease was issued before the refusal).
+    grace = timedelta(hours=settings.OFFLINE_GRACE_PERIOD_HOURS)
+    if cached.is_valid is False and cached.grace_period_started_at:
+        locks_at = cached.grace_period_started_at + grace
         if now >= locks_at:
-            out = {"activated": False, "reason": reason, "lockedAt": locks_at.isoformat() + "Z"}
-            if reason == "refused" and cached.validation_error:
+            out = {"activated": False, "reason": "refused", "lockedAt": locks_at.isoformat() + "Z"}
+            if cached.validation_error:
                 out["message"] = cached.validation_error
             return out
+        if not lease["inGrace"] or locks_at < _parse_time(lease["locksAt"]):
+            return {"activated": True, "inGrace": True, "graceReason": "refused",
+                    "locksAt": locks_at.isoformat() + "Z"}
 
-    # Activated. In grace when any condition has started its countdown.
-    started = [(locks_at, reason) for locks_at, reason, starts in deadlines if now >= starts]
-    if started:
-        locks_at, reason = min(started)
-        return {"activated": True, "inGrace": True, "graceReason": reason,
-                "locksAt": locks_at.isoformat() + "Z"}
+    if lease["inGrace"]:
+        return {"activated": True, "inGrace": True,
+                "graceReason": "expired" if expires and now >= expires else "offline_too_long",
+                "locksAt": lease["locksAt"]}
     return {"activated": True, "inGrace": False}
 
 

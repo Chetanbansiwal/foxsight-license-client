@@ -61,6 +61,10 @@ class LicenseClient:
                     # Extract license data from nested response
                     license_data = data["data"].get("license", data["data"])
 
+                    # The signed lease the activation gate relies on.
+                    import activation
+                    activation.store_lease(self.db, data["data"].get("lease"))
+
                     # Store in local cache
                     await self._store_license_cache(license_data)
 
@@ -69,9 +73,6 @@ class LicenseClient:
 
                     # The licence server accepted this machine's hardware ID:
                     # the activation gate holds the box to it (activation.py).
-                    import activation
-                    activation.record_activation_hardware(self.db, self.hardware_id)
-
                     # Heartbeats and revalidation run from main.py's background
                     # loop, which survives restarts; a scheduler started here
                     # did not.
@@ -138,6 +139,8 @@ class LicenseClient:
                 if is_valid:
                     # Update cache
                     await self._update_license_cache(validation_data)
+                    import activation
+                    activation.store_lease(self.db, validation_data.get("lease"))
 
                     # Sync feature flags from validation response
                     license_info = validation_data.get("license", {})
